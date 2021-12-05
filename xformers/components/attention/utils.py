@@ -106,3 +106,24 @@ def bool_mask_to_additive(
     mask_ = torch.zeros_like(mask, dtype=dtype)
     mask_[~mask] = float("-inf")
     return mask_
+
+
+@torch.jit.script
+def causal_product(q, k, v):
+    # A reference implementation for unit test purposes, but waay too slow to be really useful
+    B, S, E = q.shape
+    _, _, Ev = v.shape
+    assert q.shape[-1] == k.shape[-1]
+
+    # going over the batch dimension manually is slow, but it prevents the full
+    # prefix sum matrix materialization
+    res = []
+    for b in range(B):
+        res_b = []
+        prefix_sum = torch.zeros((E, Ev), dtype=q.dtype, device=q.device)
+        for s in range(S):
+            prefix_sum = prefix_sum + torch.einsum("e,d->ed", k[b, s], v[b, s])
+            res_b.append(torch.einsum("e, ed->d", q[b, s], prefix_sum))
+
+        res.append(torch.stack(res_b))
+    return torch.stack(res)

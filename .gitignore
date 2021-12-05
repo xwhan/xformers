@@ -48,6 +48,8 @@ my_runs.md
 examples/input.txt
 examples/lightning_logs
 examples/data
+input.txt
+lightning_logs
 
 # Hydra default output dir
 multirun

@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 from torch.cuda.amp import autocast
 
+from xformers import _is_triton_available
 from xformers.components.attention import Attention, AttentionConfig, register_attention
 from xformers.components.attention.feature_maps import (
     FeatureMap,
@@ -20,6 +21,14 @@ from xformers.components.attention.feature_maps import (
     SMOrf,
     SMReg,
 )
+
+if _is_triton_available:
+    from xformers.triton.causal_product import causal_product
+
+from xformers.components.attention.utils import causal_product as pytorch_causal_product
+
+# FIXME
+_enable_triton_causal_product = False
 
 
 @dataclass
@@ -33,6 +42,32 @@ class FavorAttentionConfig(AttentionConfig):
         int
     ] = None  # The number of iterations before the random features are re-drawn from scratch
     feature_map: Optional[FeatureMapType] = None
+
+
+@torch.jit.script
+def outer_prod(a, b):
+    return torch.einsum("be,bf->bef", a, b)
+
+
+@torch.jit.script
+def line_multiply(a, b):
+    return torch.einsum("bf, bfe->be", a, b)
+
+
+# @torch.jit.script
+def causal_attention(
+    q_prime: torch.Tensor, k_prime: torch.Tensor, v: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if _is_triton_available and _enable_triton_causal_product:
+        att_raw = causal_product(q_prime, k_prime, v)
+        att_norm = causal_product(q_prime, k_prime, torch.ones_like(v))
+        return att_raw, att_norm
+
+    else:
+        att_raw = pytorch_causal_product(q_prime, k_prime, v)
+        att_norm = pytorch_causal_product(q_prime, k_prime, torch.ones_like(v))
+
+    return att_raw, att_norm
 
 
 @register_attention("favor", FavorAttentionConfig)
@@ -106,25 +141,6 @@ class FavorAttention(Attention):
         # Only promote fp16 buffers, bfloat16 would be fine for instance
         return x.float() if x.dtype == torch.float16 else x
 
-    @staticmethod
-    def _causal_attention(
-        k_prime: torch.Tensor, q_prime: torch.Tensor, v: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Algorithm 1 in the paper
-        ref_v = torch.ones_like(v.unsqueeze(2))  # BATCH x SEQ x 1 x EMB
-        Gps = k_prime.unsqueeze(3) * v.unsqueeze(2)
-        Grenorm = k_prime.unsqueeze(3) * ref_v
-
-        # Consolidate against the feature dimension
-        att_raw = torch.einsum("bcfe,bcf->bce", Gps, q_prime)
-        att_norm = torch.einsum("bcfe,bcf->bce", Grenorm, q_prime)
-
-        # Cumulative sum over the sequence
-        att_raw = att_raw.cumsum(2)
-        att_norm = att_norm.cumsum(2)
-
-        return att_raw, att_norm
-
     def forward(
         self,
         q: torch.Tensor,
@@ -146,14 +162,13 @@ class FavorAttention(Attention):
             q_prime = self._maybe_promote(q_prime)
             v = self._maybe_promote(v)
 
-            if not self.causal:
+            if self.causal:
+                att_raw, att_normalization = causal_attention(q_prime, k_prime, v)
+            else:
+                att_raw = q_prime @ (k_prime.transpose(-2, -1) @ v)
                 att_normalization = q_prime @ (
                     k_prime.transpose(-2, -1) @ torch.ones_like(v)
                 )
-                att_raw = q_prime @ (k_prime.transpose(-2, -1) @ v)
-            else:
-                # Actually compute attention
-                att_raw, att_normalization = self._causal_attention(k_prime, q_prime, v)
 
             # Normalize
             att = att_raw / att_normalization

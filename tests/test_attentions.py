@@ -307,7 +307,7 @@ def test_causal(
 
     assert torch.allclose(torch.sort(res_sum)[1], torch.arange(SEQ)) or torch.allclose(
         torch.sort(res_sum, descending=True)[1], torch.arange(SEQ)
-    ), res_sum
+    ), torch.sort(res_sum)[1]
 
 
 @pytest.mark.parametrize("attn_dropout", [0.0, 0.1])
