@@ -29,6 +29,9 @@ def outer_product_mean(a, b, average: bool = True):
 
     The notations are preserved, in that we'll compute the outer product in between
     A(s, i) and B(s, j), and then mean over s
+
+    average: compute the average
+        (if not the results of the outer product are passed as is)
     """
 
     # Make sure that we're in the known [i, s] and [j, s] configuration
@@ -49,11 +52,16 @@ def outer_product_mean(a, b, average: bool = True):
             triton.cdiv(J, META["BLOCK_J"]),
         )
 
+    GROUP_S = 64
+    if S > 512:
+        GROUP_S = 32
+
     # fmt: off
     k_outer_product_mean[grid](
         outputs, a_, b_,
         S, I, J,
-        GROUP_S=64,
+        a.dtype == torch.float16,
+        GROUP_S=GROUP_S,
         AVERAGE=average)
     # fmt: on
 
