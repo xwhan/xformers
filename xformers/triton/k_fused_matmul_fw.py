@@ -22,10 +22,10 @@ import triton.language as tl
         triton.Config({"BLOCK_ROW": 128, "BLOCK_COL": 64}, num_stages=4, num_warps=4),
         triton.Config({"BLOCK_ROW": 64, "BLOCK_COL": 128}, num_stages=4, num_warps=4),
         triton.Config({"BLOCK_ROW": 128, "BLOCK_COL": 128}, num_stages=4, num_warps=4),
-        # triton.Config({"BLOCK_ROW": 32, "BLOCK_COL": 256}, num_stages=3, num_warps=4),
-        # triton.Config({"BLOCK_ROW": 256, "BLOCK_COL": 32}, num_stages=3, num_warps=4),
-        # triton.Config({"BLOCK_ROW": 64, "BLOCK_COL": 256}, num_stages=3, num_warps=8),
-        # triton.Config({"BLOCK_ROW": 256, "BLOCK_COL": 64}, num_stages=3, num_warps=8),
+        triton.Config({"BLOCK_ROW": 32, "BLOCK_COL": 256}, num_stages=3, num_warps=4),
+        triton.Config({"BLOCK_ROW": 256, "BLOCK_COL": 32}, num_stages=3, num_warps=4),
+        triton.Config({"BLOCK_ROW": 64, "BLOCK_COL": 256}, num_stages=3, num_warps=8),
+        triton.Config({"BLOCK_ROW": 256, "BLOCK_COL": 64}, num_stages=3, num_warps=8),
     ],
     key=["M", "N", "K"],
 )
@@ -122,6 +122,10 @@ def kernel_fma(
     if META["ACTIVATION"]:
         acc = META["ACTIVATION"](acc)
 
+    # optional: online scaling
+    if META["SCALE"]:
+        acc *= META["SCALE"]
+
     # write back result
     out_ptrs = OUT + rm[:, None] * stride_om + rn[None, :]
     tl.store(out_ptrs, acc, mask=(rm[:, None] < M) & (rn[None, :] < N))
@@ -133,7 +137,8 @@ def fused_matmul(
     weight: torch.Tensor,
     bias: Optional[torch.Tensor],
     activation=None,
-    save_act_inputs: bool = False
+    save_act_inputs: bool = False,
+    scale: Optional[float] = None
 ):
     """
     Compute e = activation(x @ weight + bias).
@@ -165,6 +170,10 @@ def fused_matmul(
             triton.cdiv(M, META["BLOCK_ROW"]) * triton.cdiv(N, META["BLOCK_COL"]),
         )
 
+    BLOCK_K = 32
+    if M > 1024:
+        BLOCK_K = 16
+
     # fmt: off
     kernel_fma[grid](
         # data ptrs
@@ -182,8 +191,9 @@ def fused_matmul(
         # speed optimization: group the programs
         # improve on data reuse in L2 cache
         GROUP_ROW=8,
-        BLOCK_K=32,
-        SAVE_ACT_INPUTS=save_act_inputs
+        BLOCK_K=BLOCK_K,
+        SAVE_ACT_INPUTS=save_act_inputs,
+        SCALE=scale
     )
     # fmt: on
 

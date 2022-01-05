@@ -48,7 +48,9 @@ def bench_outer_product_mean(avg):
                 return z
 
             def triton_step(x, y):
-                return outer_product_mean(x, y, average=avg)
+                return outer_product_mean(
+                    x.transpose(-2, -1), y.transpose(-2, -1), average=avg
+                )
 
             for testcase in [
                 TestCase(

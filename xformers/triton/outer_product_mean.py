@@ -3,10 +3,9 @@
 # This source code is licensed under the BSD license found in the
 # LICENSE file in the root directory of this source tree.
 
-import torch
-import triton
 
-from xformers.triton.k_outer_product_mean import k_outer_product_mean
+# from xformers.triton.k_outer_product_mean import k_outer_product_mean
+from xformers.triton.k_fused_matmul_fw import fused_matmul
 
 
 def _sanitize(x):
@@ -41,28 +40,13 @@ def outer_product_mean(a, b, average: bool = True):
     a_ = _sanitize(a)
     b_ = _sanitize(b)
 
-    I, S = a_.shape  # noqa # "ambiguous variable name I -> keeping the paper notations"
-    J, _ = b_.shape
-
-    outputs = torch.empty((I, J), device=a.device, dtype=a.dtype)
-
-    def grid(META):
-        return (
-            triton.cdiv(I, META["BLOCK_I"]),
-            triton.cdiv(J, META["BLOCK_J"]),
-        )
-
-    GROUP_S = 64
-    if S > 512:
-        GROUP_S = 32
-
-    # fmt: off
-    k_outer_product_mean[grid](
-        outputs, a_, b_,
-        S, I, J,
-        a.dtype == torch.float16,
-        GROUP_S=GROUP_S,
-        AVERAGE=average)
-    # fmt: on
+    outputs, _ = fused_matmul(
+        a_,
+        b_,
+        bias=None,
+        activation=None,
+        save_act_inputs=False,
+        scale=1.0 / a_.shape[1] if average else None,
+    )
 
     return outputs.reshape(a.shape[0], a.shape[-2], b.shape[-2])
