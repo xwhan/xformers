@@ -97,3 +97,7 @@ def init_torch_distributed_local():
         world_size=1,
         init_method=init_url,
     )
+
+
+def bf16_cuda():
+    return dict(device="cuda", dtype=torch.bfloat16)
