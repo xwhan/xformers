@@ -7,7 +7,6 @@
 import logging
 import math
 from dataclasses import dataclass
-from re import L
 from typing import Optional
 from functools import partial
 
@@ -18,21 +17,19 @@ from xformers.components.attention import Attention, AttentionConfig, register_a
 from xformers.components.attention.utils import bool_mask_to_additive
 import torch.nn.functional as F
 
-_mask_type_warning = True
 
-if _is_triton_available:
-    from triton.ops.blocksparse import matmul as blocksparse_matmul
-    from triton.ops.blocksparse import softmax as blocksparse_softmax
+from triton.ops.blocksparse import matmul as blocksparse_matmul
+from triton.ops.blocksparse import softmax as blocksparse_softmax
 
-    from xformers.triton.softmax import MaskType
-    from xformers.triton.utils import gpu_capabilities_older_than_70
+from xformers.triton.softmax import MaskType
+from xformers.triton.utils import gpu_capabilities_older_than_70
 
-    # Blocksparse requires Tensor cores
-    if gpu_capabilities_older_than_70():
-        logging.warning(
-            "Blocksparse is not available: the current GPU does not expose Tensor cores"
-        )
-        _is_triton_available = False
+# Blocksparse requires Tensor cores
+if gpu_capabilities_older_than_70():
+    logging.warning(
+        "Blocksparse is not available: the current GPU does not expose Tensor cores"
+    )
+    _is_triton_available = False
 
 
 def _split_heads(num_heads: int, x: torch.Tensor):
@@ -45,12 +42,13 @@ if _is_triton_available:
     @dataclass
     class BlockSparseLocalAttentionConfig(AttentionConfig):
         # layout: torch.Tensor  # The dimensions of the random features
-        seq_len: int
+        max_seq_len: int
         block_size: int
         dropout: float
         num_heads: int
+        global_blocks: int
 
-    @register_attention("blocksparse_local", BlockSparseLocalAttentionConfig)
+    @register_attention("bs_local", BlockSparseLocalAttentionConfig)
     class BlockSparseLocalAttention(Attention):
         r"""
         Thin wrap over the Triton blocksparse computations. The sparsity pattern is determined through the layout.
@@ -68,55 +66,25 @@ if _is_triton_available:
 
         def __init__(
             self,
-            seq_len: int,
+            max_seq_len: int,
             block_size: int = 512,
             dropout: float = 0.0,
             block_unit: int = 16,
             num_heads: int = 1,  # optional, used to adapt the layout if in need
+            global_blocks: int = 0,
             *args,
             **kwargs,
         ):
 
-            def _generate_mask(heads, seq_len, block_size):
-                local_mask = torch.zeros(heads, seq_len, seq_len)
-                for block_start in range(0, seq_len, block_size):
-                    local_mask[:, block_start:block_start+block_size, block_start:block_start+block_size] = 1
-                return local_mask
-
-            block_mask = _generate_mask(num_heads, seq_len, block_size)
-            layout = attention_patterns.pattern_to_layout(block_mask, block_unit)
-
-            if layout.dim() == 2:
-                layout = layout.unsqueeze(0).expand(num_heads, -1, -1)
-
-            assert block_unit >= 16, "Minimum block size is 16, for now at least"
-
             super().__init__()
 
+            self.max_seq_len = max_seq_len
             self.num_heads = num_heads
+            self.global_blocks = global_blocks
             self.attn_drop = torch.nn.Dropout(dropout, inplace=False)
 
-            # Pure blocksparse data
-            self.layout = layout
             self.block_size = block_size
             self.block_unit = block_unit
-
-            # blocksparse operators
-            self.sparse_dot_sdd = blocksparse_matmul(
-                self.layout,
-                self.block_unit,
-                "sdd",
-                trans_a=False,
-                trans_b=True,
-            )
-            self.sparse_dot_dsd = blocksparse_matmul(
-                self.layout,
-                self.block_unit,
-                "dsd",
-                trans_a=False,
-                trans_b=False,
-            )
-            self.sparse_softmax = blocksparse_softmax(self.layout, self.block_unit)
 
             # make sure that the head dimension is not folded down with the batch
             self.requires_head_dimension = False
@@ -126,6 +94,63 @@ if _is_triton_available:
 
             self.requires_same_k_q_dimensions = True
 
+            self.layout = self._generate_layout()
+            self.ops = {} # layout for different sequence lengths
+
+
+        def _generate_layout(self):
+
+            num_blocks = self.max_seq_len // self.block_unit
+            local_mask = torch.zeros((self.num_heads, num_blocks, num_blocks), dtype=torch.int64)
+            num_local_blocks = self.block_size // self.block_unit
+
+            for block_start in range(0, num_blocks, num_local_blocks):
+
+                # setup local patterns
+                local_mask[:, block_start:block_start+num_local_blocks, block_start:block_start+num_local_blocks] = 1
+
+                # global patterns
+                if self.global_blocks > 0:
+                    assert self.global_blocks < num_local_blocks
+
+                    local_mask[:, block_start:block_start + self.global_blocks, :] = 1
+                    local_mask[:, :, block_start:block_start + self.global_blocks] = 1
+
+            return local_mask
+
+        def _trim_layout(self, seq_len):
+            assert seq_len % self.block_unit == 0
+            num_blocks = seq_len // self.block_unit
+            return self.layout[:, :num_blocks, :num_blocks].cpu()
+
+        def _build_operators(self, seq_len):
+
+            assert seq_len % self.block_unit == 0
+
+            if seq_len not in self.ops:
+                layout = self._trim_layout(seq_len)
+                # blocksparse operators
+                sparse_dot_sdd = blocksparse_matmul(
+                    layout,
+                    self.block_unit,
+                    "sdd",
+                    trans_a=False,
+                    trans_b=True,
+                )
+                sparse_dot_dsd = blocksparse_matmul(
+                    layout,
+                    self.block_unit,
+                    "dsd",
+                    trans_a=False,
+                    trans_b=False,
+                )
+                sparse_softmax = blocksparse_softmax(layout, self.block_unit)
+
+                self.ops[seq_len] = (sparse_dot_sdd, sparse_dot_dsd, sparse_softmax)
+
+            return self.ops[seq_len]
+
+
         def update_mask_type(self, mask: torch.Tensor):
             global _mask_type_warning
             if _mask_type_warning:
@@ -133,6 +158,14 @@ if _is_triton_available:
                     "Mask has to be additive. Fixing that but this slows things down"
                 )
             mask = bool_mask_to_additive(mask)
+
+        # blocksparse requires fixed size input
+        def _pad_to_seq_size(self, x):
+            seq_len = x.size(-2)
+            pad_len = self.seq_len - seq_len
+            if pad_len == 0:
+                return x, pad_len
+            return F.pad(x, (0,0,0,pad_len), value=0), pad_len
 
         def forward(
             self,
@@ -158,9 +191,9 @@ if _is_triton_available:
             # If blocks are to be constantly masked, better perf would thus be reached by signalling them out in the
             # initial attention setup
 
+
             bh = q.size(0)
             orig_seq_len = q.size(1)
-            bsz = bh // self.num_heads
             head_dim = q.size(-1)
 
             if key_padding_mask is None:
@@ -169,16 +202,20 @@ if _is_triton_available:
 
             # pad the input length to factors of bucket size
             def _pad_to_window_size(x, window_size):
+                """
+                sequence length here should be power of 2
+                """
                 seq_len = x.size(-2)
-                pad_len = (window_size - seq_len % window_size) % window_size
+                while window_size < seq_len:
+                    window_size *= 2
+                pad_len = window_size - seq_len
                 return F.pad(x, (0,0,0,pad_len), value=0), pad_len
-            q, _ = _pad_to_window_size(q, self.block_size)
-            k, _ = _pad_to_window_size(k, self.block_size)
-            v, _ = _pad_to_window_size(v, self.block_size)
 
-            if key_padding_mask.shape[1] % self.block_size != 0:
-                pad_len = (self.block_size - key_padding_mask.shape[1] % self.block_size) % self.block_size
-                key_padding_mask = torch.cat([key_padding_mask, key_padding_mask.new_ones(key_padding_mask.size(0), pad_len).to(key_padding_mask)], dim=1)
+            q, pad_len = _pad_to_window_size(q, self.block_size)
+            k, pad_len = _pad_to_window_size(k, self.block_size)
+            v, pad_len = _pad_to_window_size(v, self.block_size)
+            key_padding_mask = torch.cat([key_padding_mask, key_padding_mask.new_ones(key_padding_mask.size(0), pad_len).to(key_padding_mask)], dim=1)
+
             key_padding_mask[key_padding_mask == 1] = float('-inf')
             key_padding_mask = key_padding_mask.to(q)
 
@@ -197,17 +234,10 @@ if _is_triton_available:
                 q.shape[-2] == k.shape[-2]
             ), "Blocksparse requires the same dimensions for K and Q for now"
 
-            assert (
-                q.shape[-2] == self.layout.shape[-2] * self.block_unit
-            ), "Actual sequence size and layout are inconsistent"
-            assert (
-                k.shape[-2] == self.layout.shape[-2] * self.block_unit
-            ), "Actual sequence size and layout are inconsistent"
-
             assert math.log(
                 q.shape[-2], 2
             ).is_integer(), (
-                "For now blocksparse only works on power-of-two sequence lengths"
+                "For now blocksparse only works on power-of-two sequence lengths", q.shape
             )
 
             # Blocksparse only works on fp16
@@ -226,10 +256,13 @@ if _is_triton_available:
             # When the computations are block sparse, the matrix types change along the way:
             # - (sparse) attention matrix = (dense) Kt * (dense) Q
             q = q / math.sqrt(q.size(-1))
-            sparse_att_mat = self.sparse_dot_sdd(q, k)
+
+            sparse_dot_sdd, sparse_dot_dsd, sparse_softmax = self._build_operators(q.size(-2))
+
+            sparse_att_mat = sparse_dot_sdd(q, k)
 
             # - softmax on the sparse attention matrix
-            sparse_att_mat = self.sparse_softmax(
+            sparse_att_mat = sparse_softmax(
                 sparse_att_mat,
                 scale=scale,
                 key_padding_mask=key_padding_mask,
@@ -241,7 +274,7 @@ if _is_triton_available:
             sparse_att_mat = self.attn_drop(sparse_att_mat)
 
             # - then (dense) attention is (sparse) attention matrix * dense (value)
-            a = self.sparse_dot_dsd(sparse_att_mat, v)
+            a = sparse_dot_dsd(sparse_att_mat, v)
 
             out = a.view(bh, -1, head_dim)[:,:orig_seq_len]
 
