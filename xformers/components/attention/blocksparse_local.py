@@ -9,6 +9,7 @@ import math
 from dataclasses import dataclass
 from typing import Optional
 from functools import partial
+from numpy import block
 
 import torch
 
@@ -175,6 +176,7 @@ if _is_triton_available:
             att_mask: Optional[torch.Tensor] = None,
             key_padding_mask: Optional[torch.Tensor] = None,
             scale: float = 1.0,
+            attn_bias: Optional[torch.Tensor] = None,
             *args,
             **kwargs,
         ) -> torch.Tensor:
@@ -261,6 +263,12 @@ if _is_triton_available:
 
             sparse_att_mat = sparse_dot_sdd(q, k)
 
+            if attn_bias is not None:
+                block_attn_bias = self.extract_block_bias(attn_bias, k.shape[-2])
+                block_attn_bias = block_attn_bias.view(1, self.num_heads, -1, self.block_size // self.block_unit, self.block_unit, self.block_size // self.block_unit, self.block_unit).transpose(-2,-3)
+                block_attn_bias = block_attn_bias.reshape(1, -1, self.block_unit, self.block_unit)
+                sparse_att_mat += block_attn_bias
+
             # - softmax on the sparse attention matrix
             sparse_att_mat = sparse_softmax(
                 sparse_att_mat,
@@ -280,5 +288,12 @@ if _is_triton_available:
 
             if q_dtype != torch.float16:
                 return out.to(q_dtype)
-
             return out
+
+
+        def extract_block_bias(self, attn_bias, seq_len):
+            attn_bias = attn_bias[:,:,:seq_len,:seq_len]
+            block_bias = []
+            for b_idx in range(seq_len // self.block_size):
+                block_bias.append(attn_bias[:,:, b_idx*self.block_size: b_idx*self.block_size+self.block_size, b_idx*self.block_size: b_idx*self.block_size+self.block_size].unsqueeze(2))
+            return torch.cat(block_bias, dim=2)

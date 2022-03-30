@@ -10,6 +10,7 @@ Simple non-ovelapping local block attention. To test how strong are the locality
 
 from dataclasses import dataclass
 from typing import Optional
+from numpy import extract
 
 import torch
 from torch import nn
@@ -96,7 +97,7 @@ class BlockNoglobalAttention(Attention):
         # add relational bias
         seq_len = q.size(1)
         if attn_bias is not None:
-            dots += attn_bias.unsqueeze(2)[:,:,:,:seq_len,:seq_len]
+            dots += self.extract_block_bias(attn_bias, seq_len)
 
         block_attn_weights = dots.view(bsz*self.num_head, -1, self.block_size)
         all_attn_probs = block_attn_weights.softmax(dim=-1)
@@ -110,7 +111,15 @@ class BlockNoglobalAttention(Attention):
         out = out[:,:orig_seq_len]
         return out
 
+    def extract_block_bias(self, attn_bias, seq_len):
+        attn_bias = attn_bias[:,:,:seq_len,:seq_len]
+        block_bias = []
+        for b_idx in range(seq_len // self.block_size):
+            block_bias.append(attn_bias[:,:, b_idx*self.block_size: b_idx*self.block_size+self.block_size, b_idx*self.block_size: b_idx*self.block_size+self.block_size].unsqueeze(2))
+        return torch.cat(block_bias, dim=2)
+
 def blockify(num_blocks, t, dim=1):
     shape = list(t.shape)
     shape[dim:dim+1] = [num_blocks, -1]
     return t.reshape(*shape)
+
