@@ -16,16 +16,15 @@ class LongformerConfig(AttentionConfig):
     block_size: int
     num_heads: int
     dim_model: int
-    window_size: int
 
 @register_attention("longformer", LongformerConfig)
 class LongformerAttention(Attention):
     def __init__(
-        self, 
-        dropout: float, 
+        self,
+        dropout: float,
         num_heads: int,
         dim_model: int,
-        window_size: int = 128,
+        block_size: int = 512,
         *args, **kwargs
     ):
         super().__init__()
@@ -33,18 +32,18 @@ class LongformerAttention(Attention):
         self.num_head = num_heads
         self.head_dim = dim_model // num_heads
         self.dim = dim_model
-        self.window_size = window_size
+        self.window_size = block_size
         self.embed_dim = dim_model
 
     def forward(
-        self, 
-        q: torch.Tensor, 
-        k: torch.Tensor, 
-        v: torch.Tensor, 
-        att_mask: Optional[torch.Tensor] = None, 
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        att_mask: Optional[torch.Tensor] = None,
         key_padding_mask: Optional[Tensor] = None,
         *args, **kwargs
-    ): 
+    ):
 
         assert key_padding_mask is not None
         attention_mask = key_padding_mask.to(q)
@@ -94,7 +93,7 @@ class LongformerAttention(Attention):
 
 
         q = q.view(bsz, self.num_head, seq_len, self.head_dim).transpose(1,2).mul(1./math.sqrt(self.head_dim))
-        k = k.view(bsz, self.num_head, seq_len, self.head_dim).transpose(1,2) 
+        k = k.view(bsz, self.num_head, seq_len, self.head_dim).transpose(1,2)
         v = v.view(bsz, self.num_head, seq_len, self.head_dim).transpose(1,2)
 
         attn_weights = sliding_chunks_matmul_qk(q, k, self.window_size, padding_value=0) # bsz, seq_len, num_heads, 2 * w + 1
@@ -135,7 +134,7 @@ class LongformerAttention(Attention):
         attn_weights = attn_weights_float.type_as(attn_weights)
         #attn_probs = F.dropout(attn_weights_float.type_as(attn_weights), p=self.dropout, training=self.training)
         attn_probs = self.drop_attn(attn_weights)
-        
+
         attn = 0
 
         if extra_attention_mask is not None:
@@ -225,7 +224,7 @@ def sliding_chunks_matmul_qk(q: torch.Tensor, k: torch.Tensor, w: int, padding_v
     # copy parts from diagonal_chunk_attn into the compined matrix of attentions
     # - copying the main diagonal and the upper triangle
     diagonal_attn[:, :-1, :, w:] = diagonal_chunk_attn[:, :, :w, :w + 1]
-    diagonal_attn[:, -1, :, w:] = diagonal_chunk_attn[:, -1, w:, :w + 1] # Potential BUG: invalid attn weights 
+    diagonal_attn[:, -1, :, w:] = diagonal_chunk_attn[:, -1, w:, :w + 1] # Potential BUG: invalid attn weights
     # - copying the lower triangle
     diagonal_attn[:, 1:, :, :w] = diagonal_chunk_attn[:, :, - (w + 1):-1, w + 1:]
     diagonal_attn[:, 0, 1:w, 1:w] = diagonal_chunk_attn[:, 0, :w - 1, 1 - w:]
@@ -276,7 +275,7 @@ def _chunk(x, w):
     chunk_size[1] = chunk_size[1] * 2 - 1
 
     chunk_stride = list(x.stride())
-    # chunk_stride[1]: 512 x dim 
+    # chunk_stride[1]: 512 x dim
     chunk_stride[1] = chunk_stride[1] // 2
     return x.as_strided(size=chunk_size, stride=chunk_stride)
 

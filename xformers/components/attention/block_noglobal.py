@@ -33,7 +33,7 @@ class BlockNoglobalAttention(Attention):
         self,
         dropout: float,
         num_heads: int,
-        block_size: int = 256, #
+        block_size: int = 1024,
         *args, **kwargs
     ):
         super().__init__()

@@ -30,6 +30,7 @@ class BlockAttentionConfig(AttentionConfig):
     block_size: int
     num_heads: int
     require_key_mask: bool
+    num_global_tokens: int # global tokens per block
 
 @register_attention("block", BlockAttentionConfig)
 class BlockAttention(Attention):
@@ -37,7 +38,8 @@ class BlockAttention(Attention):
         self,
         dropout: float,
         num_heads: int,
-        block_size: int = 512, #
+        block_size: int = 1024, #
+        num_global_tokens: int = 1,
         *args, **kwargs
     ):
 
@@ -45,6 +47,7 @@ class BlockAttention(Attention):
         self.bucket_size = block_size
         self.drop_attn = nn.Dropout(dropout)
         self.num_head = num_heads
+        self.num_global_tokens = num_global_tokens
 
     def forward(
         self,
@@ -64,7 +67,6 @@ class BlockAttention(Attention):
 
         assert key_padding_mask is not None
         key_padding_mask = key_padding_mask.to(q)
-        key_padding_mask[:,0] = -1
 
         # pad the input length to factors of bucket size
         def _pad_to_window_size(x, window_size):
@@ -79,6 +81,11 @@ class BlockAttention(Attention):
             pad_len = (self.bucket_size - key_padding_mask.shape[1] % self.bucket_size) % self.bucket_size
             # key padding mask: 1 means padding tokens
             key_padding_mask = torch.cat([key_padding_mask, key_padding_mask.new_ones(key_padding_mask.size(0), pad_len).to(key_padding_mask)], dim=1)
+
+        # adding global token masks
+        for block_idx in range(key_padding_mask.shape[1] // self.bucket_size):
+            block_start = block_idx * self.bucket_size
+            key_padding_mask[:,block_start:block_start + self.num_global_tokens] = -1
 
         # global attention tokens
         extra_attention_mask = key_padding_mask < 0

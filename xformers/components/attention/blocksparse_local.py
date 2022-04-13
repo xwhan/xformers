@@ -67,8 +67,8 @@ if _is_triton_available:
 
         def __init__(
             self,
-            max_seq_len: int,
-            block_size: int = 512,
+            max_seq_len: int = 16384,
+            block_size: int = 1024,
             dropout: float = 0.0,
             block_unit: int = 16,
             num_heads: int = 1,  # optional, used to adapt the layout if in need

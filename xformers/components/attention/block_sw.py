@@ -11,10 +11,9 @@ from xformers.components.attention import Attention, AttentionConfig, register_a
 
 @dataclass
 class BlockwiseConfig(AttentionConfig):
-    block_size: int
     num_heads: int
     dim_model: int
-    window_size: int
+    block_size: int
 
 @register_attention("block_sw", BlockwiseConfig)
 class BlockWiseAttention(Attention):
@@ -23,7 +22,7 @@ class BlockWiseAttention(Attention):
         dropout: float,
         num_heads: int,
         dim_model: int,
-        window_size: int = 128,
+        block_size: int = 512,
         *args, **kwargs
     ):
         super().__init__()
@@ -31,7 +30,7 @@ class BlockWiseAttention(Attention):
         self.num_head = num_heads
         self.head_dim = dim_model // num_heads
         self.dim = dim_model
-        self.window_size = window_size
+        self.window_size = block_size
 
     def get_tiles(self, x, transpose=False):
         # x: bsz x n_heads x seqlen x d_head
@@ -182,7 +181,6 @@ class BlockWiseAttention(Attention):
         outputs = outputs[:,:,:sequence_length].view(-1, sequence_length, self.head_dim)
 
         return outputs
-
 
 
     # def forward(
