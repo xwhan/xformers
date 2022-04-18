@@ -68,24 +68,11 @@ class BlockAttention(Attention):
         assert key_padding_mask is not None
         key_padding_mask = key_padding_mask.to(q)
 
-        # pad the input length to factors of bucket size
-        def _pad_to_window_size(x, window_size):
-            seq_len = x.size(-2)
-            pad_len = (window_size - seq_len % window_size) % window_size
-            return F.pad(x, (0,0,0,pad_len), value=0), pad_len
-        q, _ = _pad_to_window_size(q, self.bucket_size)
-        k, _ = _pad_to_window_size(k, self.bucket_size)
-        v, _ = _pad_to_window_size(v, self.bucket_size)
-
-        if key_padding_mask.shape[1] % self.bucket_size != 0:
-            pad_len = (self.bucket_size - key_padding_mask.shape[1] % self.bucket_size) % self.bucket_size
-            # key padding mask: 1 means padding tokens
-            key_padding_mask = torch.cat([key_padding_mask, key_padding_mask.new_ones(key_padding_mask.size(0), pad_len).to(key_padding_mask)], dim=1)
-
         # adding global token masks
-        for block_idx in range(key_padding_mask.shape[1] // self.bucket_size):
-            block_start = block_idx * self.bucket_size
-            key_padding_mask[:,block_start:block_start + self.num_global_tokens] = -1
+        if self.num_global_tokens > 0:
+            for block_idx in range(key_padding_mask.shape[1] // self.bucket_size):
+                block_start = block_idx * self.bucket_size
+                key_padding_mask[:,block_start:block_start + self.num_global_tokens] = -1
 
         # global attention tokens
         extra_attention_mask = key_padding_mask < 0
@@ -144,7 +131,6 @@ class BlockAttention(Attention):
         mask = mq[:, :, :, None] * mk[:, :, None, :]
 
         dots.masked_fill_(~mask, mask_value)
-        del mask
 
         block_attn_weights = dots.view(bsz*self.num_head, -1, self.bucket_size)
 
@@ -154,9 +140,8 @@ class BlockAttention(Attention):
         else:
             all_attn = block_attn_weights
 
-        all_attn_probs = all_attn.softmax(dim=-1)
+        all_attn_probs = F.softmax(all_attn, dim=-1)
         all_attn_probs = self.drop_attn(all_attn_probs)
-
 
         C = 0
         # calculate block attention
@@ -173,12 +158,12 @@ class BlockAttention(Attention):
             selected_q[selection_padding_mask_nonzeros] = q_splited[extra_attention_mask_nonzeros]
 
             g2all_attn_weights = selected_q.transpose(1,2).matmul(k_splited.permute(0,2,3,1)) * (head_dim ** -0.5)
-            g2all_attn_weights[selection_padding_mask_zeros[0], :, selection_padding_mask_zeros[1], :] = -10000.0
+            g2all_attn_weights[selection_padding_mask_zeros[0], :, selection_padding_mask_zeros[1], :] = -10000
 
             if hard_mask is not None:
                 g2all_attn_weights = g2all_attn_weights.masked_fill(
                     hard_mask.unsqueeze(1).unsqueeze(2),
-                    -10000.0,
+                    -10000,
                 )
 
             g2all_attn_probs_float = F.softmax(g2all_attn_weights, dim=-1, dtype=torch.float32)

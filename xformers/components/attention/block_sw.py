@@ -144,19 +144,6 @@ class BlockWiseAttention(Attention):
         K = k.view(batch_size, self.num_head, -1, self.head_dim).transpose(1,2).reshape(batch_size, -1, self.dim)
         V = v.view(batch_size, self.num_head, -1, self.head_dim).transpose(1,2).reshape(batch_size, -1, self.dim)
 
-        # needs centain sequence length to make the block wise local attention work
-        def _pad_to_window_size(x, window_size):
-            seq_len = x.size(-2)
-            pad_len = (window_size - seq_len % window_size) % window_size
-            return F.pad(x, (0,0,0,pad_len), value=0), pad_len
-        Q, _ = _pad_to_window_size(Q, self.window_size)
-        K, _ = _pad_to_window_size(K, self.window_size)
-        V, _ = _pad_to_window_size(V, self.window_size)
-        if key_padding_mask.shape[1] % self.window_size != 0:
-            pad_len = (self.window_size - key_padding_mask.shape[1] % self.window_size) % self.window_size
-            # key padding mask: 1 means padding tokens
-            key_padding_mask = torch.cat([key_padding_mask, key_padding_mask.new_ones(key_padding_mask.size(0), pad_len).to(key_padding_mask)], dim=1)
-
         K = self.split_heads(K) # (B, H, seq_len, head_dim)
         V = self.split_heads(V)
 
