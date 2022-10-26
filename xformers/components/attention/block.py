@@ -39,7 +39,7 @@ class BlockAttention(Attention):
         dropout: float,
         num_heads: int,
         block_size: int = 1024, #
-        num_global_tokens: int = 1,
+        num_global_tokens: int = 64,
         *args, **kwargs
     ):
 

@@ -53,9 +53,9 @@ class BlockNoglobalAttention(Attention):
         # Notation: batch size: B, sequence length: L, number of blocks: nb, number of heads: nh
         # q, k, v: (B * nh, L, head_dim)
         bh = q.size(0)
-        orig_seq_len = q.size(1)
         bsz = bh // self.num_head
         head_dim = q.size(-1)
+        sequence_length = q.shape[1]
 
         if key_padding_mask is None:
             key_padding_mask = torch.zeros(int(q.shape[0]/self.num_head), q.size(-2))
@@ -74,7 +74,7 @@ class BlockNoglobalAttention(Attention):
             pad_len = (self.block_size - key_padding_mask.shape[1] % self.block_size) % self.block_size
             key_padding_mask = torch.cat([key_padding_mask, key_padding_mask.new_ones(key_padding_mask.size(0), pad_len).to(key_padding_mask)], dim=1)
 
-        assert q.shape[1] % self.block_size == 0
+        assert q.shape[1] % self.block_size == 0, q.shape
         num_blocks = q.shape[1] // self.block_size
         b_q = blockify(num_blocks, q)
         b_k, b_v = map(partial(blockify, num_blocks), (k, v)) # (B * nh, nb, L // nb, head_dim)
@@ -107,7 +107,7 @@ class BlockNoglobalAttention(Attention):
         block_attn_probs = block_attn_probs.view(bsz*self.num_head, -1, self.block_size, self.block_size)
         out = block_attn_probs.matmul(b_v).view(bsz*self.num_head, -1, head_dim)
 
-        out = out[:,:orig_seq_len]
+        out = out[:, :sequence_length, :]
         return out
 
     def extract_block_bias(self, attn_bias, seq_len):

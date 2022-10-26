@@ -9,12 +9,11 @@ import math
 from dataclasses import dataclass
 from typing import Optional
 from functools import partial
-from numpy import block
 
 import torch
 
 from xformers import _is_triton_available
-from xformers.components.attention import Attention, AttentionConfig, register_attention, attention_patterns
+from xformers.components.attention import Attention, AttentionConfig, register_attention
 from xformers.components.attention.utils import bool_mask_to_additive
 import torch.nn.functional as F
 
